@@ -163,6 +163,19 @@ Medido sobre un archivo de 1.000 MB / 8.130.082 líneas en Apple Silicon (M-seri
 
 **Decisión descubierta — índice perezoso obligatorio.** El índice *completo* al abrir lee todos los bytes → RSS ≈ tamaño del archivo, lo que rompe "abrir 10 GB con poca RAM". **v1 usará un índice de líneas perezoso/muestreado**: indexar bajo demanda al hacer scroll (no todo al abrir) y `madvise` para que el SO descarte páginas no visitadas. El acceso O(1) ya probado se mantiene; solo cambia *cuándo* se construye el índice. Esto también arregla el arranque (no escanear 1 GB en el hilo de apertura).
 
+**Implementado (índice perezoso).** Medido sobre 1 GB / mismo archivo:
+
+| Métrica | Eager (índice completo) | Lazy (bajo demanda) |
+|---|---|---|
+| Abrir (mmap) | 148 ms caliente / 2244 ms frío | **0.05 ms** |
+| Primer viewport (60 líneas) | — | **0.16 ms** |
+| Índice en heap | 67 MB | **~0.5 KB** |
+| RSS pico | ~1019 MB | **9.2 MB** |
+
+Coste: el conteo total de líneas es perezoso; `End` / `line_count()` fuerzan un full scan
+(y ahí el RSS sube a ~tamaño del archivo, porque escanear toca todas las páginas).
+Mitigación pendiente: `madvise(MADV_DONTNEED)` sobre lo escaneado, o índice muestreado.
+
 ---
 
 ## 10. Métrica de éxito de la v1

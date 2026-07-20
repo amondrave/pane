@@ -1,34 +1,54 @@
-//! Pane core: memory-mapped file loading and line indexing.
+//! Pane core: memory-mapped file loading and a LAZY line index.
 //!
-//! Key design (see PRD): the original file is mapped read-only (`memmap2`) and
-//! the OS manages paging. Only the line-offset index lives on the heap, never
-//! the content. This is what lets Pane open multi-GB files without loading them
-//! entirely into memory.
+//! Key design (see PRD §9): the original file is mapped read-only (`memmap2`)
+//! and the OS manages paging. The line index is built **on demand** — we only
+//! scan far enough to answer the lines actually requested (e.g. the visible
+//! viewport). Opening a 10 GB file therefore touches almost no pages, keeping
+//! peak RSS low, instead of scanning the whole file up front.
+//!
+//! Interior mutability (`Mutex`) lets the index grow behind a shared `&self`,
+//! so a single `TextFile` can be shared (e.g. `Arc`) by the UI while it keeps
+//! discovering lines as the user scrolls.
 
 use std::borrow::Cow;
 use std::fs::File;
 use std::io;
 use std::path::Path;
+use std::sync::Mutex;
 
 use memmap2::Mmap;
 
-/// A text file opened via mmap, with a line index.
+/// A text file opened via mmap, with a lazily-built line index.
 pub struct TextFile {
     mmap: Mmap,
-    /// Byte offset where each line starts. `len()` == number of lines.
+    index: Mutex<LineIndex>,
+}
+
+struct LineIndex {
+    /// Byte offset where each discovered line starts. Always begins with `[0]`.
     line_starts: Vec<usize>,
+    /// Byte offset scanned up to so far.
+    scanned: usize,
+    /// Whether the whole file has been scanned (true line count is known).
+    complete: bool,
 }
 
 impl TextFile {
-    /// Opens `path`, maps it into memory and builds the line index.
+    /// Opens `path` and maps it into memory. Does NOT scan the file — the line
+    /// index is built lazily on first access.
     pub fn open<P: AsRef<Path>>(path: P) -> io::Result<Self> {
         let file = File::open(path)?;
         // SAFETY: we treat the mapping as read-only and never mutate it. The
-        // file could change underneath us; for the spike we assume it stays
-        // stable (handling external edits is v1+ work).
+        // file could change underneath us; for now we assume it stays stable.
         let mmap = unsafe { Mmap::map(&file)? };
-        let line_starts = build_line_index(&mmap);
-        Ok(Self { mmap, line_starts })
+        Ok(Self {
+            mmap,
+            index: Mutex::new(LineIndex {
+                line_starts: vec![0],
+                scanned: 0,
+                complete: false,
+            }),
+        })
     }
 
     /// File size in bytes.
@@ -36,19 +56,45 @@ impl TextFile {
         self.mmap.len()
     }
 
-    /// Number of lines.
+    /// Number of lines discovered so far (grows as the file is scrolled/scanned).
+    /// This is NOT the true total unless [`is_complete`](Self::is_complete).
+    pub fn indexed_line_count(&self) -> usize {
+        self.index.lock().unwrap().line_starts.len()
+    }
+
+    /// Whether the entire file has been scanned (true line count is known).
+    pub fn is_complete(&self) -> bool {
+        self.index.lock().unwrap().complete
+    }
+
+    /// True total line count. Forces a full scan if not already complete.
     pub fn line_count(&self) -> usize {
-        self.line_starts.len()
+        self.ensure_indexed_to(usize::MAX);
+        self.index.lock().unwrap().line_starts.len()
+    }
+
+    /// Clamps `idx` to a valid line, scanning on demand up to `idx` (or EOF).
+    /// Passing `usize::MAX` forces a full scan and returns the last line index.
+    pub fn clamp_to_line(&self, idx: usize) -> usize {
+        self.ensure_indexed_to(idx);
+        let count = self.index.lock().unwrap().line_starts.len();
+        idx.min(count.saturating_sub(1))
     }
 
     /// Raw bytes of line `idx`, without the trailing newline (LF or CRLF).
+    /// Returns `None` if `idx` is past the end of the file.
     pub fn line_bytes(&self, idx: usize) -> Option<&[u8]> {
-        let start = *self.line_starts.get(idx)?;
-        let end = self
-            .line_starts
-            .get(idx + 1)
-            .copied()
-            .unwrap_or(self.mmap.len());
+        self.ensure_indexed_to(idx);
+        let (start, end) = {
+            let ix = self.index.lock().unwrap();
+            let start = *ix.line_starts.get(idx)?;
+            let end = ix
+                .line_starts
+                .get(idx + 1)
+                .copied()
+                .unwrap_or(self.mmap.len());
+            (start, end)
+        };
         let mut slice = &self.mmap[start..end];
         if slice.last() == Some(&b'\n') {
             slice = &slice[..slice.len() - 1];
@@ -64,34 +110,40 @@ impl TextFile {
         self.line_bytes(idx).map(String::from_utf8_lossy)
     }
 
-    /// Heap bytes used by the line index.
+    /// Heap bytes used by the line index so far.
     ///
-    /// The mmap pages are NOT counted here: the OS manages them and they don't
-    /// live on the process heap. This number is the real RAM cost we add.
+    /// The mmap pages are NOT counted: the OS manages them and they don't live
+    /// on the process heap. This is the real RAM cost the index adds.
     pub fn index_heap_bytes(&self) -> usize {
-        self.line_starts.capacity() * std::mem::size_of::<usize>()
+        self.index.lock().unwrap().line_starts.capacity() * std::mem::size_of::<usize>()
     }
-}
 
-/// Builds the index of line-start offsets by scanning for LF bytes.
-///
-/// Uses `memchr` (SIMD) to sweep the buffer at memory speed. Design note: this
-/// reads the whole file once. For 10 GB with instant open, v1 will need a
-/// sampled/lazy index; here we measure the honest cost of the full index.
-fn build_line_index(bytes: &[u8]) -> Vec<usize> {
-    let mut starts = Vec::with_capacity(1024);
-    starts.push(0);
-    for pos in memchr::memchr_iter(b'\n', bytes) {
-        starts.push(pos + 1);
-    }
-    // If the file ends in '\n', the last offset points past the end and marks a
-    // phantom empty line: drop it (except for an empty file).
-    if let Some(&last) = starts.last() {
-        if last == bytes.len() && starts.len() > 1 {
-            starts.pop();
+    /// Scans forward (via SIMD `memchr`) just enough so that line `target_line`
+    /// can be read — i.e. until we know where line `target_line + 1` starts, or
+    /// we hit EOF. No-op if already indexed that far. `usize::MAX` = full scan.
+    fn ensure_indexed_to(&self, target_line: usize) {
+        let mut ix = self.index.lock().unwrap();
+        let need = target_line.saturating_add(2);
+        while !ix.complete && ix.line_starts.len() < need {
+            let from = ix.scanned;
+            match memchr::memchr(b'\n', &self.mmap[from..]) {
+                Some(rel) => {
+                    let next = from + rel + 1;
+                    ix.line_starts.push(next);
+                    ix.scanned = next;
+                }
+                None => {
+                    ix.complete = true;
+                    // Drop the phantom empty line when the file ends in '\n'.
+                    if let Some(&last) = ix.line_starts.last() {
+                        if last == self.mmap.len() && ix.line_starts.len() > 1 {
+                            ix.line_starts.pop();
+                        }
+                    }
+                }
+            }
         }
     }
-    starts
 }
 
 #[cfg(test)]
@@ -132,5 +184,29 @@ mod tests {
         let tf = TextFile::open(&p).unwrap();
         assert_eq!(tf.line(0).unwrap(), "a");
         assert_eq!(tf.line(1).unwrap(), "b");
+    }
+
+    #[test]
+    fn indexes_lazily() {
+        let p = write_tmp("pane_test_lazy.txt", b"l0\nl1\nl2\nl3\nl4\n");
+        let tf = TextFile::open(&p).unwrap();
+        // Nothing scanned yet beyond the initial [0].
+        assert_eq!(tf.indexed_line_count(), 1);
+        assert!(!tf.is_complete());
+        // Touching line 2 indexes only up to what's needed, not the whole file.
+        assert_eq!(tf.line(2).unwrap(), "l2");
+        assert!(tf.indexed_line_count() >= 3);
+        assert!(!tf.is_complete());
+        // Forcing the count completes the scan.
+        assert_eq!(tf.line_count(), 5);
+        assert!(tf.is_complete());
+    }
+
+    #[test]
+    fn clamp_to_line_bounds() {
+        let p = write_tmp("pane_test_clamp.txt", b"a\nb\nc\n");
+        let tf = TextFile::open(&p).unwrap();
+        assert_eq!(tf.clamp_to_line(1), 1);
+        assert_eq!(tf.clamp_to_line(usize::MAX), 2); // last line
     }
 }

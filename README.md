@@ -29,23 +29,26 @@ It is **not** another IDE and not trying to be. See [`idea.md`](idea.md) for the
 - **Built for the agent workflow.** Fast open, search, and (soon) diff review of what your agents produce.
 - **Offline, no telemetry, no subscriptions.** MIT, forever.
 
-## v0 spike measurements
+## Measurements
 
-Early numbers from the core engine on a 1 GB / 8.1M-line file (Apple Silicon, release build):
+Opening a 1 GB / 8.1M-line file (Apple Silicon, release build) with the lazy line index:
 
-| | Warm |
+| | 1 GB file |
 |---|---|
-| Open + index | **148 ms** |
-| Jump to any offset | **~0 µs** (O(1)) |
-| Line-index heap | 67 MB |
+| Open (mmap, lazy) | **0.05 ms** |
+| First screenful | **0.16 ms** |
+| Peak RSS | **9 MB** |
+| Jump to any line | O(1) |
 
-> These are `v0` spike numbers, not a shipped product. Reducing peak RSS on multi-GB files (via a lazy/sampled index) is the next core task — see [`PRD.md`](PRD.md) §9.
+> Pane only scans the lines you actually view, so opening a 1 GB file touches
+> ~9 MB of RAM instead of ~1 GB. Jumping to the very end forces a full scan
+> (as any editor must). These are early engine numbers, not a shipped product.
 
 ## Status & roadmap
 
 - [x] **v0 spike** — mmap + line index + O(1) viewport access (validated)
-- [ ] **v0.2** — GPU window (`winit`/`wgpu`/`glyphon`), fluid 60fps scroll
-- [ ] **v1 (MVP)** — lazy index, basic editing, regex search, viewport Tree-sitter highlighting, benchmarks
+- [x] **v0.2** — GPU window (`winit`/`wgpu`/`glyphon`), fluid scroll, lazy line index (~9 MB RSS on a 1 GB file)
+- [ ] **v1 (MVP)** — basic editing, regex search, viewport Tree-sitter highlighting, benchmarks
 - [ ] **v2** — multi-cursor, diff viewer, log explorer
 - [ ] **v3** — JSON/SQL/Markdown tools, session restore, plugins, optional offline AI
 
@@ -92,6 +95,29 @@ Run the tests:
 ```bash
 cargo test -p pane-core
 ```
+
+### Review mode (for AI coding agents)
+
+Open a file — e.g. code an agent just generated — for a **blocking review**. Approve or
+reject, and the window closes returning the verdict as the process **exit code**. That
+makes Pane a human-in-the-loop gate an agent can spawn and branch on:
+
+```bash
+pane --review path/to/generated.rs     # A / Enter = approve · R / Esc = reject · Q = cancel
+echo $?                                 # 0 approved · 1 rejected · 2 cancelled
+
+pane --review --json path/to/file.rs   # also prints {"verdict":"approved"} to stdout
+```
+
+Review a change as a unified colored diff (green additions, red deletions):
+
+```bash
+pane --diff old.rs new.rs               # view the diff
+pane --review --diff old.rs new.rs      # review it, verdict → exit code
+```
+
+You can still scroll (wheel / arrows / page / home / end) to read before deciding. An
+MCP/skill wrapper so coding agents can invoke this automatically is on the roadmap.
 
 **Where it's headed:** `pane <file>` will open a native GPU window you scroll, search
 and edit; dragging a file onto the app (or `Pane.app`) will do the same. Those flows

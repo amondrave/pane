@@ -72,6 +72,8 @@ Usar siempre el scratchpad de la sesión, nunca el repo. Limpiar los artefactos 
 - **Código y comentarios en inglés** (decidido: alcance opensource). Los docs de
   proyecto (`PRD.md`, `CLAUDE.md`, `HANDOFF.md`, `idea.md`) siguen en español.
 - Benchmarks son ciudadanos de primera clase, no un extra.
+- **`BACKLOG.md`** (local, en `.gitignore` — no se comparte) lista los features a
+  desarrollar. El scope oficial sigue en `PRD.md`; el backlog es el cuaderno de "qué sigue".
 
 ## Cómo trabajamos (preferencias del usuario)
 
