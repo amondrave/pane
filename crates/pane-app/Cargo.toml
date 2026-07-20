@@ -1,0 +1,17 @@
+[package]
+name = "pane-app"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "pane"
+path = "src/main.rs"
+
+[dependencies]
+pane-core = { path = "../pane-core" }
+libc = "0.2"
+glyphon = "0.12.0"
+winit = "0.30.13"
+pollster = "1.0.1"
+wgpu = "30"

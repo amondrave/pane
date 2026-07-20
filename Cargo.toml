@@ -1,0 +1,15 @@
+[workspace]
+resolver = "2"
+members = ["crates/pane-core", "crates/pane-app"]
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/pane-editor/pane"
+
+# Perfil de release orientado a rendimiento: es el binario que mediremos.
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
