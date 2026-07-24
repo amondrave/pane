@@ -7,3 +7,4 @@ license.workspace = true
 [dependencies]
 memmap2 = "0.9"
 memchr = "2"
+regex = "1"

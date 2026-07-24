@@ -59,10 +59,10 @@ Requires a recent stable Rust toolchain (via [rustup](https://rustup.rs)).
 ```bash
 git clone https://github.com/pane-editor/pane
 cd pane
-cargo build --release
+./install.sh          # builds, installs `pane` on your PATH, registers the agent integration
 ```
 
-The binary is produced at `target/release/pane`.
+Or just build it: `cargo build --release` → `target/release/pane`.
 
 ## Usage
 
@@ -116,8 +116,27 @@ pane --diff old.rs new.rs               # view the diff
 pane --review --diff old.rs new.rs      # review it, verdict → exit code
 ```
 
-You can still scroll (wheel / arrows / page / home / end) to read before deciding. An
-MCP/skill wrapper so coding agents can invoke this automatically is on the roadmap.
+Review **everything an agent just changed** in one window with a single verdict — this is
+the command agents use:
+
+```bash
+pane --review --git       # every modified/added/deleted file in the git working tree
+```
+
+New files are shown in full (as all-additions), not just a fragment. You can scroll
+(wheel / arrows / page / home / end) through the whole changeset before deciding. For an
+explicit set: `pane --review --changeset changes.tsv` (lines of `old<TAB>new<TAB>label`).
+
+**Search** — press `/` to search, `n` / `N` to jump between matches. Works in any mode
+(file, diff, changeset), even while reviewing.
+
+**Syntax highlighting** — Tree-sitter colors for JSON, Rust, TOML, Markdown and Java,
+applied to files under 4 MB (huge logs stay plain and load lazily).
+
+**Agent integration is model-agnostic** — it is just a CLI command and its exit codes, so
+it works with Claude, Codex, Cursor, Gemini or anything that can run a shell command. See
+[`integrations/`](integrations/): a drop-in snippet for any `AGENTS.md`, plus a Claude Code
+skill. A local MCP server (`pane --mcp`) is on the roadmap.
 
 **Where it's headed:** `pane <file>` will open a native GPU window you scroll, search
 and edit; dragging a file onto the app (or `Pane.app`) will do the same. Those flows

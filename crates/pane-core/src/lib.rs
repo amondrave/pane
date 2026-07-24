@@ -118,6 +118,46 @@ impl TextFile {
         self.index.lock().unwrap().line_starts.capacity() * std::mem::size_of::<usize>()
     }
 
+    /// Searches the whole file for `pattern`, returning the indices of matching
+    /// lines (capped at `max`). `use_regex` selects regex vs literal substring.
+    ///
+    /// This scans the entire file — as any search must — building the full line
+    /// index in the process. Returns an empty vec on an invalid regex.
+    pub fn search(&self, pattern: &str, use_regex: bool, max: usize) -> Vec<usize> {
+        let mut hits = Vec::new();
+        if pattern.is_empty() || max == 0 {
+            return hits;
+        }
+        enum Matcher {
+            Re(regex::bytes::Regex),
+            Lit(memchr::memmem::Finder<'static>),
+        }
+        let matcher = if use_regex {
+            match regex::bytes::Regex::new(pattern) {
+                Ok(re) => Matcher::Re(re),
+                Err(_) => return hits,
+            }
+        } else {
+            Matcher::Lit(memchr::memmem::Finder::new(pattern.as_bytes()).into_owned())
+        };
+
+        let mut i = 0usize;
+        while let Some(line) = self.line_bytes(i) {
+            let found = match &matcher {
+                Matcher::Re(re) => re.is_match(line),
+                Matcher::Lit(f) => f.find(line).is_some(),
+            };
+            if found {
+                hits.push(i);
+                if hits.len() >= max {
+                    break;
+                }
+            }
+            i += 1;
+        }
+        hits
+    }
+
     /// Scans forward (via SIMD `memchr`) just enough so that line `target_line`
     /// can be read — i.e. until we know where line `target_line + 1` starts, or
     /// we hit EOF. No-op if already indexed that far. `usize::MAX` = full scan.
@@ -208,5 +248,16 @@ mod tests {
         let tf = TextFile::open(&p).unwrap();
         assert_eq!(tf.clamp_to_line(1), 1);
         assert_eq!(tf.clamp_to_line(usize::MAX), 2); // last line
+    }
+
+    #[test]
+    fn search_literal_regex_and_cap() {
+        let p = write_tmp("pane_test_search.txt", b"alpha\nbeta\ngamma\nalphabet\n");
+        let tf = TextFile::open(&p).unwrap();
+        assert_eq!(tf.search("alpha", false, 100), vec![0, 3]); // alpha, alphabet
+        assert_eq!(tf.search("^beta$", true, 100), vec![1]);
+        assert_eq!(tf.search("zzz", false, 100), Vec::<usize>::new());
+        assert_eq!(tf.search("a", false, 2).len(), 2); // capped
+        assert!(tf.search("(", true, 100).is_empty()); // invalid regex → empty
     }
 }

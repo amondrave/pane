@@ -46,13 +46,69 @@ agentes IA"); el resto de v1 (piece-tree, búsqueda, Tree-sitter) sigue en el ba
 - **Paso 2 (✅ verificado en vivo):** `pane --diff old new` y `pane --review --diff old new` — diff
   unificado con `similar 3.1`, color +/- (verde/rojo) vía `set_rich_text` (color por línea).
   Abstracción `Source` (File lazy | Diff) en `pane-app`. El usuario aprobó un diff en vivo (exit 0).
-- **Paso 3 (siguiente):** envoltura MCP local / skill para agentes (solo humano-presente + display). CLI primero.
+- **Paso 3a (✅ hecho y verificado por el usuario):** changeset multi-archivo + integración de agentes.
+  - `pane --review --changeset <manifest.tsv>` — N diffs en una ventana, un veredicto. TSV
+    `old<TAB>new<TAB>label` (lado vacío = archivo nuevo/borrado).
+  - **`pane --review --git`** — la lógica de git vive DENTRO del binario (`std::process::Command`):
+    lee `git status --porcelain -uall`, saca old de `HEAD:<path>` y new del disco. **Eliminado el
+    helper `.sh`** — ya no hace falta script suelto. Detecta modificado/nuevo/borrado/renombrado,
+    salta directorios. Errores claros: fuera de repo → exit 2, sin cambios → exit 0.
+- **Agnóstico al modelo (✅):** `AGENTS.md` en la raíz es ahora la guía canónica; `CLAUDE.md` es solo
+  un puntero. `integrations/` tiene `agents-snippet.md` (drop-in para cualquier AGENTS.md/rules) +
+  `claude-code/SKILL.md`. La integración es solo un comando CLI + exit codes → sirve a cualquier agente.
+- **Instalador (✅):** `./install.sh` — compila e instala `pane` en el PATH (`cargo install`) y copia el
+  skill a `~/.claude/skills/pane-review/`, así funciona desde cualquier proyecto sin setup por repo.
+- **Tier 1 quick wins (✅ hecho, falta verificación visual):** números de línea (gutter right-aligned,
+  ancho medido de `layout_runs().line_w`; en diff numera por archivo nuevo vía `change.new_index()`),
+  `clamp_scroll` (no más pantalla vacía al final), y el patrón review-antes-de-escribir documentado.
+  Refactor: `DiffLine`→`ViewLine{text,color,num}`; `Source::clamp_scroll(idx,visible)` sustituye a
+  `clamp_to_line` en el scroll. 5 tests core verdes, compila.
+- **Backlog reorganizado por tiers** (valor/esfuerzo) en `BACKLOG.md`. Decidido: MCP baja a Tier 4
+  (la integración CLI+exit-codes ya es agnóstica → cualquier agente usa Pane hoy; MCP no da capacidad nueva).
+- **Tier 2 búsqueda (✅ hecho, falta test visual):** `pane-core::search(pat, use_regex, max)` escanea
+  todo el archivo (literal `memmem` / regex `regex::bytes`), devuelve índices de línea. 6 tests core.
+  UI en `main.rs`: `/` abre input, teclea query, Enter busca, `n`/`N` navegan, resalta la coincidencia
+  (color `HL`), barra de estado inferior unificada (search | footer de review). El input de búsqueda
+  captura TODO el teclado (las letras no disparan veredicto mientras escribes). Regex está en el motor;
+  falta el toggle en la UI (hoy la barra hace literal).
+- **Tema Material dark (✅ vía agente en paralelo):** aplicada la paleta de `docs/theme-proposal.md` —
+  fondo `#131316` (casi neutro, antes azul-gris), acentos desaturados, gutter subido a ~3.8:1 (antes
+  2.86:1, bajo el mínimo de 3:1 → era la causa real del cansancio de los números). Constantes en `main.rs`.
+- **Fixes de UX (tras prueba del usuario):** (1) En búsqueda, `Esc` limpia la búsqueda en vez de cerrar
+  Pane. (2) Las coincidencias se **centran** al saltar (Enter y `n`/`N`). (3) `Resized` re-clampa el scroll.
+- **BUG DE SCROLL (causa raíz, ventana chica no llegaba al fondo):** se usaba el MISMO conteo de líneas
+  para dibujar (`visible_lines` = `ceil+1`, con fila parcial abajo) y para el clamp/paginado. El sobre-conteo
+  hacía que las últimas 1-2 líneas se dibujaran recortadas bajo el viewport y el clamp no dejara bajar más;
+  en ventana chica el sobre-conteo es proporcionalmente grande → no llegabas al final; maximizada casi no se
+  nota. **Fix:** nuevo `page_lines()` = `floor(h/lh)` (líneas completas) para clamp/paginado/centrado; `visible_lines`
+  (ceil+1) queda solo para cuántas dibujar. Todos los `clamp_scroll` y el paginado usan `page_lines`.
+  Pendiente si aún se siente tosco con trackpad: acumular deltas sub-línea del wheel (hoy se truncan a 0).
+- **CAUSA RAÍZ REAL del scroll (2ª iteración):** era el **word-wrap**. Las líneas largas (p. ej. un sha512)
+  se partían en varias filas visuales, lo que (a) desalineaba los números del gutter y (b) hacía que un
+  pantallazo tuviera menos líneas LÓGICAS que `page_lines`, así que el clamp se quedaba corto y no llegabas
+  al fondo. **Fix:** `text_buffer.set_wrap(Wrap::None)` (y footer/gutter). Una línea lógica = una fila.
+  Efecto: las líneas largas ahora se cortan a la derecha → falta scroll horizontal (backlog).
+- **Pedido del usuario:** barra de scroll vertical tipo nativa a la derecha (backlog Tier 2).
+- **Tema:** el usuario dice que se ve algo mejor; NO prioritario, se refinará luego.
+- **Syntax highlighting (✅ hecho, falta test visual):** módulo `pane-app/src/syntax.rs` con Tree-sitter
+  para **JSON, Rust, TOML, Markdown (bloque), Java** (`tree-sitter` 0.26, `tree-sitter-highlight` 0.26,
+  gramáticas + `tree-sitter-toml-ng`, `tree-sitter-md`). Paleta One-Dark-ish (KEYWORD/STRING/COMMENT/
+  NUMBER/FUNCTION/TYPE/PROPERTY/PUNCT). `HighlightConfiguration::new(Language, name, hl, "", "")` +
+  `configure(HIGHLIGHT_NAMES)`; eventos `Source/HighlightStart/End` → rangos coloreados.
+  - **Refactor grande:** `ViewLine` pasó de `{text, color}` a `{spans: Vec<(String,Color)>, num}` (multicolor);
+    `Source::Diff`→`Source::Lines` (diff, changeset y highlighted comparten Vec<ViewLine>); `layout_text`
+    concatena spans + `\n`. Se resalta la búsqueda recoloreando spans.
+  - **Gate:** highlight solo si extensión conocida Y `< 4 MB` (`HL_MAX_BYTES`); logs enormes → `Source::File` plano/lazy.
+  - Smoke test: los 5 lenguajes renderizan sin panic. 6 tests core verdes.
+- **Siguiente candidato (Tier 2):** scroll horizontal + barra de scroll (cierra el hueco del no-wrap),
+  o pulido de búsqueda (toggle regex + substring). Distribución (Tier 3) mejor DESPUÉS.
 
 ## Notas de arquitectura (review mode)
 
 - `Source` enum en `main.rs`: `File(TextFile)` (lazy/mmap) o `Diff(Vec<DiffLine>)` (coloreado).
-  Unifica el render: ambos pasan por `set_rich_text` con color por línea.
-- Diff se computa completo al abrir (los archivos a comparar son código normal, no GB).
+  Unifica el render: ambos pasan por `set_rich_text` con color por línea. El changeset multi-archivo
+  también es `Source::Diff` (headers de archivo en color ACCENT + diffs concatenados).
+- Diff se computa completo al abrir (los archivos a comparar son código normal, no GB). `similar 3.1`.
 - Verdict por exit code se resuelve tras `run_app`, leyendo `app.verdict`.
 - Pendiente hardening (backlog): ignorar key events `is_synthetic` en el verdict.
 
