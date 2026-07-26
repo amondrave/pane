@@ -1329,7 +1329,7 @@ dependencies = [
 
 [[package]]
 name = "pane-app"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "glyphon",
  "libc",
@@ -1350,7 +1350,7 @@ dependencies = [
 
 [[package]]
 name = "pane-core"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "memchr",
  "memmap2",

@@ -1,0 +1,47 @@
+name: release
+
+# Push a tag like v0.1.0 → build a universal macOS binary and publish it as a
+# GitHub Release. The Homebrew formula (packaging/homebrew) points at these
+# release tarballs.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust targets
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Check tag matches Cargo.toml version
+        run: |
+          VERSION="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
+          TAG="${GITHUB_REF_NAME#v}"
+          if [ "$VERSION" != "$TAG" ]; then
+            echo "tag v$TAG != Cargo.toml version $VERSION" >&2
+            exit 1
+          fi
+
+      - name: Run tests
+        run: cargo test --release -p pane-core
+
+      - name: Build universal binary
+        run: ./scripts/build-universal.sh
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            dist/pane-*-macos-universal.tar.gz \
+            dist/pane-*-macos-universal.tar.gz.sha256 \
+            --title "Pane $GITHUB_REF_NAME" \
+            --notes "See CHANGELOG.md for details. Install: \`brew install amondrave/tap/pane\` or download the tarball (universal: Apple Silicon + Intel)."

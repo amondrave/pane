@@ -3,9 +3,10 @@ resolver = "2"
 members = ["crates/pane-core", "crates/pane-app"]
 
 [workspace.package]
+version = "0.1.0"
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/pane-editor/pane"
+repository = "https://github.com/amondrave/pane"
 
 # Perfil de release orientado a rendimiento: es el binario que mediremos.
 [profile.release]

@@ -52,17 +52,26 @@ Opening a 1 GB / 8.1M-line file (Apple Silicon, release build) with the lazy lin
 - [ ] **v2** — multi-cursor, diff viewer, log explorer
 - [ ] **v3** — JSON/SQL/Markdown tools, session restore, plugins, optional offline AI
 
-## Install & build
+📖 **User guide:** [English](docs/user-guide.en.md) · [Español](docs/user-guide.es.md)
 
-Requires a recent stable Rust toolchain (via [rustup](https://rustup.rs)).
+## Install
+
+**Homebrew** (no Rust required — universal binary for Apple Silicon and Intel):
 
 ```bash
-git clone https://github.com/pane-editor/pane
+brew install amondrave/tap/pane
+```
+
+**From source** (requires a stable Rust toolchain via [rustup](https://rustup.rs)):
+
+```bash
+git clone https://github.com/amondrave/pane
 cd pane
 ./install.sh          # builds, installs `pane` on your PATH, registers the agent integration
 ```
 
-Or just build it: `cargo build --release` → `target/release/pane`.
+Or just build it: `cargo build --release` → `target/release/pane`. A release
+tarball can be built locally with `./scripts/build-universal.sh`.
 
 ## Usage
 

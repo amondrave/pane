@@ -147,6 +147,14 @@ impl Source {
         }
     }
 
+    /// Lines known so far (exact for `Lines`; grows while a lazy file indexes).
+    fn total_lines(&self) -> usize {
+        match self {
+            Source::File(f) => f.indexed_line_count(),
+            Source::Lines(d) => d.len(),
+        }
+    }
+
     /// Searches all content, returning matching line indices (capped at `max`).
     fn search(&self, pat: &str, use_regex: bool, max: usize) -> Vec<usize> {
         match self {
@@ -399,6 +407,10 @@ fn main() {
     let mut positionals: Vec<String> = Vec::new();
     for arg in std::env::args().skip(1) {
         match arg.as_str() {
+            "--version" | "-V" => {
+                println!("pane {}", env!("CARGO_PKG_VERSION"));
+                return;
+            }
             "--review" => review = true,
             "--json" => json = true,
             "--stat" => stat = true,
@@ -601,13 +613,18 @@ impl ApplicationHandler for Application {
             }
 
             WindowEvent::MouseWheel { delta, .. } => {
-                let lines = match delta {
-                    MouseScrollDelta::LineDelta(_, y) => -(y * 3.0) as i64,
-                    MouseScrollDelta::PixelDelta(p) => -(p.y as f32 / LINE_HEIGHT) as i64,
+                let (dx, lines) = match delta {
+                    MouseScrollDelta::LineDelta(x, y) => (x * 40.0, -(y * 3.0) as i64),
+                    MouseScrollDelta::PixelDelta(p) => {
+                        (p.x as f32, -(p.y as f32 / LINE_HEIGHT) as i64)
+                    }
                 };
                 let next = (state.scroll as i64 + lines).max(0) as usize;
                 let vis = state.page_lines();
                 state.scroll = source.clamp_scroll(next, vis);
+                // Pan horizontally; the upper bound is clamped at layout time,
+                // when the widths of the visible lines are known.
+                state.hscroll = (state.hscroll - dx).max(0.0);
                 state.window.request_redraw();
             }
 
@@ -703,10 +720,20 @@ impl ApplicationHandler for Application {
                     Key::Named(NamedKey::ArrowUp) => s.saturating_sub(1),
                     Key::Named(NamedKey::PageDown) => source.clamp_scroll(s + page, vis),
                     Key::Named(NamedKey::PageUp) => s.saturating_sub(page),
-                    Key::Named(NamedKey::Home) => 0,
+                    Key::Named(NamedKey::Home) => {
+                        state.hscroll = 0.0;
+                        0
+                    }
                     Key::Named(NamedKey::End) => source.clamp_scroll(usize::MAX, vis),
                     _ => s,
                 };
+                match &key.logical_key {
+                    Key::Named(NamedKey::ArrowRight) => state.hscroll += 60.0 * state.scale,
+                    Key::Named(NamedKey::ArrowLeft) => {
+                        state.hscroll = (state.hscroll - 60.0 * state.scale).max(0.0);
+                    }
+                    _ => {}
+                }
                 state.window.request_redraw();
             }
 
@@ -735,8 +762,11 @@ struct WindowState {
     gutter_buffer: Buffer,
 
     scroll: usize,
+    /// Horizontal scroll offset in physical pixels (no-wrap → long lines pan).
+    hscroll: f32,
     scale: f32,
     review: bool,
+    quads: QuadRenderer,
 
     // Search state.
     search_input: bool,   // typing a query
@@ -800,6 +830,8 @@ impl WindowState {
         footer_buffer.set_wrap(Wrap::None);
         gutter_buffer.set_wrap(Wrap::None);
 
+        let quads = QuadRenderer::new(&device, format);
+
         Self {
             device,
             queue,
@@ -813,7 +845,9 @@ impl WindowState {
             text_buffer,
             footer_buffer,
             gutter_buffer,
+            quads,
             scroll: 0,
+            hscroll: 0.0,
             scale,
             review,
             search_input: false,
@@ -887,12 +921,22 @@ impl WindowState {
             }
             rich.push(("\n", Attrs::new().family(Family::Monospace)));
         }
-        self.text_buffer
-            .set_size(Some((width - content_left).max(1.0)), Some(height));
+        // Width None: with Wrap::None lines never wrap, and leaving the width
+        // unbounded avoids culling glyphs we pan to; TextArea bounds clip.
+        self.text_buffer.set_size(None, Some(height));
         self.text_buffer
             .set_rich_text(rich, &mono, Shaping::Advanced, None);
         self.text_buffer
             .shape_until_scroll(&mut self.font_system, false);
+
+        // Clamp the horizontal pan to the widest visible line.
+        let max_line_w = self
+            .text_buffer
+            .layout_runs()
+            .map(|r| r.line_w)
+            .fold(0.0f32, f32::max);
+        let avail = (width - content_left).max(1.0);
+        self.hscroll = self.hscroll.clamp(0.0, (max_line_w - avail).max(0.0));
 
         content_left
     }
@@ -953,6 +997,33 @@ impl WindowState {
                 .shape_until_scroll(&mut self.font_system, false);
         }
 
+        // Scrollbar: subtle track + proportional thumb at the right edge. With a
+        // lazy file `total` is the lines discovered so far, so the thumb shrinks
+        // as more of the file gets indexed — an honest progress indicator.
+        self.quads.clear();
+        let total = source.total_lines();
+        let page = self.page_lines();
+        if total > page {
+            let track_w = 6.0 * self.scale;
+            let (x0, x1) = (width - track_w, width);
+            let track_h = content_bottom as f32;
+            let thumb_h = (track_h * page as f32 / total as f32).max(24.0 * self.scale);
+            let denom = (total - page) as f32;
+            let frac = (self.scroll as f32 / denom).min(1.0);
+            let thumb_y = frac * (track_h - thumb_h);
+            self.quads
+                .push(x0, 0.0, x1, track_h, width, height, [1.0, 1.0, 1.0, 0.05]);
+            self.quads.push(
+                x0,
+                thumb_y,
+                x1,
+                thumb_y + thumb_h,
+                width,
+                height,
+                [1.0, 1.0, 1.0, 0.22],
+            );
+        }
+
         self.viewport.update(
             &self.queue,
             Resolution {
@@ -979,7 +1050,9 @@ impl WindowState {
             },
             TextArea {
                 buffer: &self.text_buffer,
-                left: content_left,
+                // Pan left by the horizontal scroll; bounds still clip at the
+                // gutter's right edge so panned text never overlaps the numbers.
+                left: content_left - self.hscroll,
                 top: PADDING,
                 scale: 1.0,
                 bounds: TextBounds {
@@ -1066,11 +1139,128 @@ impl WindowState {
             self.text_renderer
                 .render(&self.atlas, &self.viewport, &mut pass)
                 .unwrap();
+            self.quads.draw(&self.queue, &mut pass);
         }
 
         self.queue.submit(Some(encoder.finish()));
         self.queue.present(frame);
         self.atlas.trim();
+    }
+}
+
+/// Minimal solid-color quad renderer (wgpu pipeline). glyphon only draws text,
+/// so UI chrome like the scrollbar needs its own tiny pipeline.
+struct QuadRenderer {
+    pipeline: wgpu::RenderPipeline,
+    vbuf: wgpu::Buffer,
+    verts: Vec<f32>, // interleaved: x, y (NDC), r, g, b, a
+}
+
+const QUAD_SHADER: &str = "
+struct VsOut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) color: vec4<f32>,
+};
+@vertex
+fn vs_main(@location(0) pos: vec2<f32>, @location(1) color: vec4<f32>) -> VsOut {
+    var out: VsOut;
+    out.pos = vec4<f32>(pos, 0.0, 1.0);
+    out.color = color;
+    return out;
+}
+@fragment
+fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    return in.color;
+}
+";
+
+impl QuadRenderer {
+    /// Room for a handful of quads (track + thumb + future chrome).
+    const MAX_QUADS: usize = 8;
+    const FLOATS_PER_VERT: usize = 6;
+
+    fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("quad"),
+            source: wgpu::ShaderSource::Wgsl(QUAD_SHADER.into()),
+        });
+        let attrs = wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x4];
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("quad"),
+            layout: None,
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[Some(wgpu::VertexBufferLayout {
+                    array_stride: (Self::FLOATS_PER_VERT * 4) as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &attrs,
+                })],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        let vbuf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("quad-verts"),
+            size: (Self::MAX_QUADS * 6 * Self::FLOATS_PER_VERT * 4) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        Self {
+            pipeline,
+            vbuf,
+            verts: Vec::new(),
+        }
+    }
+
+    fn clear(&mut self) {
+        self.verts.clear();
+    }
+
+    /// Queues a quad given in physical pixels (origin top-left).
+    fn push(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, w: f32, h: f32, color: [f32; 4]) {
+        if self.verts.len() / (6 * Self::FLOATS_PER_VERT) >= Self::MAX_QUADS {
+            return;
+        }
+        let nx = |x: f32| x / w * 2.0 - 1.0;
+        let ny = |y: f32| 1.0 - y / h * 2.0;
+        let quad = [
+            (x0, y0),
+            (x1, y0),
+            (x0, y1),
+            (x1, y0),
+            (x1, y1),
+            (x0, y1),
+        ];
+        for (x, y) in quad {
+            self.verts.extend_from_slice(&[nx(x), ny(y)]);
+            self.verts.extend_from_slice(&color);
+        }
+    }
+
+    fn draw(&self, queue: &wgpu::Queue, pass: &mut wgpu::RenderPass) {
+        if self.verts.is_empty() {
+            return;
+        }
+        let bytes: Vec<u8> = self.verts.iter().flat_map(|f| f.to_ne_bytes()).collect();
+        queue.write_buffer(&self.vbuf, 0, &bytes);
+        pass.set_pipeline(&self.pipeline);
+        pass.set_vertex_buffer(0, self.vbuf.slice(..));
+        pass.draw(0..(self.verts.len() / Self::FLOATS_PER_VERT) as u32, 0..1);
     }
 }
 

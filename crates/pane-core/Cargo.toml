@@ -1,8 +1,9 @@
 [package]
 name = "pane-core"
-version = "0.0.0"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 
 [dependencies]
 memmap2 = "0.9"

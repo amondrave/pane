@@ -100,8 +100,29 @@ agentes IA"); el resto de v1 (piece-tree, búsqueda, Tree-sitter) sigue en el ba
     concatena spans + `\n`. Se resalta la búsqueda recoloreando spans.
   - **Gate:** highlight solo si extensión conocida Y `< 4 MB` (`HL_MAX_BYTES`); logs enormes → `Source::File` plano/lazy.
   - Smoke test: los 5 lenguajes renderizan sin panic. 6 tests core verdes.
-- **Siguiente candidato (Tier 2):** scroll horizontal + barra de scroll (cierra el hueco del no-wrap),
-  o pulido de búsqueda (toggle regex + substring). Distribución (Tier 3) mejor DESPUÉS.
+- **Scroll horizontal + barra de scroll (✅ hecho, falta test visual):**
+  - `hscroll: f32` en px físicos; rueda/trackpad eje X + flechas ←/→ (60px·scale por pulso); Home
+    resetea. Clamp en `layout_text` contra el ancho real shaped de las líneas visibles (`line_w`).
+    El `TextArea` del contenido se desplaza `left: content_left - hscroll` pero sus bounds clipean
+    en el borde del gutter (los números nunca se tapan). `text_buffer.set_size(None, …)` para no
+    cull-ear glifos panneados (con `Wrap::None` el ancho no afecta el layout).
+  - **`QuadRenderer`**: mini pipeline wgpu propio (shader WGSL inline, vértices pos+color NDC,
+    `ALPHA_BLENDING`, `vertex_attr_array!`) porque glyphon solo pinta texto. Dibuja track sutil
+    (alpha 0.05) + thumb proporcional (0.22) a la derecha; con archivo lazy el thumb usa las líneas
+    indexadas hasta ahora (se encoge al descubrir más). Solo indicador, sin drag todavía.
+  - Smoke test OK (300 líneas de anchos variados, sin panic). 6 tests core verdes.
+- **Tier 3 distribución (✅ infraestructura lista, 2026-07-25):**
+  - Versionado `0.1.0` en el workspace (crates lo heredan), `pane --version`, `CHANGELOG.md`.
+  - `scripts/build-universal.sh`: build de ambos targets + `lipo` → validado local (fat binary
+    arm64+x86_64, 21 MB, tarball+sha256 en `dist/`, gitignored). Target x86_64 instalado.
+  - `.github/workflows/release.yml`: push de tag `v*` → check tag==versión → tests → build universal
+    → GitHub Release con assets. Runner macos-14.
+  - `packaging/homebrew/pane.rb` (fórmula template) + `packaging/homebrew/README.md` (proceso).
+  - URLs corregidas al repo real: `github.com/amondrave/pane` (antes placeholder pane-editor).
+  - ⚠️ **Pasos manuales del usuario para estrenar**: repo público + `git tag v0.1.0 && git push origin
+    v0.1.0` + crear `amondrave/homebrew-tap` con la fórmula (sha del asset .sha256 del release).
+- **Siguiente candidato:** pulido de búsqueda (toggle regex + substring highlight + go-to-line),
+  scrollbar interactiva (drag), o markdown inline. También pendiente: primer release real (tag).
 
 ## Notas de arquitectura (review mode)
 
